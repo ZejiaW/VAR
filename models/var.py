@@ -42,7 +42,7 @@ class VAR(nn.Module):
         self.begin_ends = []
         cur = 0
         for i, pn in enumerate(self.patch_nums):
-            self.begin_ends.append((cur, cur+pn ** 2))
+            self.begin_ends.append((cur, cur+pn ** 2)) # (0, 1), (1, 5), (5, 14), (14, 30), (30, 55), (55, 91) ...
             cur += pn ** 2
         
         self.num_stages_minus_1 = len(self.patch_nums) - 1
@@ -54,7 +54,7 @@ class VAR(nn.Module):
         self.vae_quant_proxy: Tuple[VectorQuantizer2] = (quant,)
         self.word_embed = nn.Linear(self.Cvae, self.C)
         
-        # 2. class embedding
+        # 2. class embedding (class embedding should be changed to accomodate the language prompt)
         init_std = math.sqrt(1 / self.C / 3)
         self.num_classes = num_classes
         self.uniform_prob = torch.full((1, num_classes), fill_value=1.0 / num_classes, dtype=torch.float32, device=dist.get_device())
@@ -162,9 +162,9 @@ class VAR(nn.Module):
             # last_L = cur_L
             cur_L += pn*pn
             # assert self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].sum() == 0, f'AR with {(self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L] != 0).sum()} / {self.attn_bias_for_masking[:, :, last_L:cur_L, :cur_L].numel()} mask item'
-            cond_BD_or_gss = self.shared_ada_lin(cond_BD)
+            cond_BD_or_gss = self.shared_ada_lin(cond_BD) # 2B 1 6 C
             x = next_token_map
-            AdaLNSelfAttn.forward
+            # AdaLNSelfAttn.forward
             for b in self.blocks:
                 x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
             logits_BlV = self.get_logits(x, cond_BD)

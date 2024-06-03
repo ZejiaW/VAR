@@ -67,7 +67,7 @@ class VectorQuantizer2(nn.Module):
                 if self.using_znorm:
                     rest_NC = F.interpolate(f_rest, size=(pn, pn), mode='area').permute(0, 2, 3, 1).reshape(-1, C) if (si != SN-1) else f_rest.permute(0, 2, 3, 1).reshape(-1, C)
                     rest_NC = F.normalize(rest_NC, dim=-1)
-                    idx_N = torch.argmax(rest_NC @ F.normalize(self.embedding.weight.data.T, dim=0), dim=1)
+                    idx_N = torch.argmax(rest_NC @ F.normalize(self.embedding.weight.data.T, dim=0), dim=1) # nearst neighbour
                 else:
                     rest_NC = F.interpolate(f_rest, size=(pn, pn), mode='area').permute(0, 2, 3, 1).reshape(-1, C) if (si != SN-1) else f_rest.permute(0, 2, 3, 1).reshape(-1, C)
                     d_no_grad = torch.sum(rest_NC.square(), dim=1, keepdim=True) + torch.sum(self.embedding.weight.data.square(), dim=1, keepdim=False)
@@ -95,7 +95,7 @@ class VectorQuantizer2(nn.Module):
                 mean_vq_loss += F.mse_loss(f_hat.data, f_BChw).mul_(self.beta) + F.mse_loss(f_hat, f_no_grad)
             
             mean_vq_loss *= 1. / SN
-            f_hat = (f_hat.data - f_no_grad).add_(f_BChw)
+            f_hat = (f_hat.data - f_no_grad).add_(f_BChw) # make sure that the gradient is not propagated through quantization
         
         margin = tdist.get_world_size() * (f_BChw.numel() / f_BChw.shape[1]) / self.vocab_size * 0.08
         # margin = pn*pn / 100
