@@ -23,8 +23,10 @@ import dist
 
 
 class Args(Tap):
-    data_path: str = '/path/to/imagenet'
-    exp_name: str = 'text'
+    # data_path: str = '/path/to/imagenet'
+    data_path: str = '/root/data_new/zejia/workspace/psl/var/datasets/COCO2017'
+    # exp_name: str = 'text'
+    exp_name: str = 'VAR-text-COCO'
     
     # VAE
     vfast: int = 0      # torch.compile VAE; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
@@ -32,6 +34,7 @@ class Args(Tap):
     tfast: int = 0      # torch.compile VAR; =0: not compile; 1: compile with 'reduce-overhead'; 2: compile with 'max-autotune'
     depth: int = 16     # VAR depth
     # VAR initialization
+    use_pretrained_ckpt: bool = True # whether to use pretrained ckpt
     ini: float = -1     # -1: automated model parameter initialization
     hd: float = 0.02    # head.w *= hd
     aln: float = 0.5    # the multiplier of ada_lin.w's initialization

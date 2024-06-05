@@ -20,8 +20,8 @@ class SharedAdaLin(nn.Linear):
 
 class VAR(nn.Module):
     def __init__(
-        self, vae_local: VQVAE,
-        num_classes=1000, depth=16, embed_dim=1024, num_heads=16, mlp_ratio=4., drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
+        self, vae_local: VQVAE, # num_classes=1000, 
+        depth=16, embed_dim=1024, num_heads=16, mlp_ratio=4., drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
         norm_eps=1e-6, shared_aln=False, cond_drop_rate=0.1,
         attn_l2_norm=False,
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),   # 10 steps by default
@@ -31,7 +31,9 @@ class VAR(nn.Module):
         # 0. hyperparameters
         assert embed_dim % num_heads == 0
         self.Cvae, self.V = vae_local.Cvae, vae_local.vocab_size
-        self.depth, self.C, self.D, self.num_heads = depth, embed_dim, embed_dim, num_heads
+        # self.depth, self.C, self.D, self.num_heads = depth, embed_dim, embed_dim, num_heads
+        self.depth, self.C, self.num_heads = depth, embed_dim, num_heads
+        self.D = 768 # hard coded for now
         
         self.cond_drop_rate = cond_drop_rate
         self.prog_si = -1   # progressive training
@@ -56,12 +58,24 @@ class VAR(nn.Module):
         
         # 2. class embedding (class embedding should be changed to accomodate the language prompt)
         init_std = math.sqrt(1 / self.C / 3)
-        self.num_classes = num_classes
-        self.uniform_prob = torch.full((1, num_classes), fill_value=1.0 / num_classes, dtype=torch.float32, device=dist.get_device())
-        self.class_emb = nn.Embedding(self.num_classes + 1, self.C)
-        nn.init.trunc_normal_(self.class_emb.weight.data, mean=0, std=init_std)
+        # self.num_classes = num_classes
+        # self.uniform_prob = torch.full((1, num_classes), fill_value=1.0 / num_classes, dtype=torch.float32, device=dist.get_device())
+        # self.class_emb = nn.Embedding(self.num_classes + 1, self.C)
+        
+        # self.condition_embedding = nn.Linear(self.D, self.C)
+        # nn.init.trunc_normal_(self.condition_embedding.weight.data, mean=0, std=init_std)
+        
+        # nn.init.trunc_normal_(self.class_emb.weight.data, mean=0, std=init_std)
         self.pos_start = nn.Parameter(torch.empty(1, self.first_l, self.C))
         nn.init.trunc_normal_(self.pos_start.data, mean=0, std=init_std)
+        
+        # cond embedding when no prompt as parameters
+        no_caption_emb = torch.empty(1, self.D, requires_grad=False)
+        nn.init.trunc_normal_(no_caption_emb, mean=0, std=init_std)
+        self.register_buffer('no_caption_emb', no_caption_emb)
+        
+        # self.no_caption_emb = nn.Parameter(torch.empty(1, self.D))
+        # nn.init.trunc_normal_(self.no_caption_emb.data, mean=0, std=init_std)
         
         # 3. absolute position embedding
         pos_1LC = []
@@ -75,6 +89,10 @@ class VAR(nn.Module):
         # level embedding (similar to GPT's segment embedding, used to distinguish different levels of token pyramid)
         self.lvl_embed = nn.Embedding(len(self.patch_nums), self.C)
         nn.init.trunc_normal_(self.lvl_embed.weight.data, mean=0, std=init_std)
+        # self.linear_to_sos = nn.Linear(self.D, self.C)
+        # nn.init.trunc_normal_(self.linear_to_sos.weight.data, mean=0, std=init_std)
+        self.sos_padding = nn.Parameter(torch.empty(1, self.C-self.D))
+        nn.init.trunc_normal_(self.sos_padding.data, mean=0, std=init_std)
         
         # 4. backbone blocks
         self.shared_ada_lin = nn.Sequential(nn.SiLU(inplace=False), SharedAdaLin(self.D, 6*self.C)) if shared_aln else nn.Identity()
@@ -125,7 +143,9 @@ class VAR(nn.Module):
     
     @torch.no_grad()
     def autoregressive_infer_cfg(
-        self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
+        self, B: int, 
+        text_features_BD: torch.Tensor,  # text features for the prompt
+        # label_B: Optional[Union[int, torch.LongTensor]],
         g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
         more_smooth=False,
     ) -> torch.Tensor:   # returns reconstructed image (B, 3, H, W) in [0, 1]
@@ -133,6 +153,7 @@ class VAR(nn.Module):
         only used for inference, on autoregressive mode
         :param B: batch size
         :param label_B: imagenet label; if None, randomly sampled
+        :param text_features_BD: text features for the prompt
         :param g_seed: random seed
         :param cfg: classifier-free guidance ratio
         :param top_k: top-k sampling
@@ -143,12 +164,19 @@ class VAR(nn.Module):
         if g_seed is None: rng = None
         else: self.rng.manual_seed(g_seed); rng = self.rng
         
-        if label_B is None:
-            label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
-        elif isinstance(label_B, int):
-            label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.lvl_1L.device)
+        # if label_B is None:
+        #     label_B = torch.multinomial(self.uniform_prob, num_samples=B, replacement=True, generator=rng).reshape(B)
+        # elif isinstance(label_B, int):
+        #     label_B = torch.full((B,), fill_value=self.num_classes if label_B < 0 else label_B, device=self.lvl_1L.device)
         
-        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        if text_features_BD is None:
+            text_features_BD = self.no_caption_emb.expand(B, -1)
+        
+        # sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        cond_BD = torch.cat((text_features_BD, self.no_caption_emb.expand(B, -1)), dim=0)
+        # sos = self.linear_to_sos(cond_BD)
+        sos = torch.cat((cond_BD, self.sos_padding.expand(2*B, -1)), dim=1)
+        assert tuple(sos.shape) == (2*B, self.C)
         
         lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
         next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
@@ -189,17 +217,24 @@ class VAR(nn.Module):
         for b in self.blocks: b.attn.kv_caching(False)
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
-    def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
+    def forward(self, text_features_BD: torch.Tensor,  # text features for the prompt
+                # label_B: torch.LongTensor, 
+                x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
         """
         :param label_B: label_B
+        :param text_features_BD: text features for the prompt
         :param x_BLCv_wo_first_l: teacher forcing input (B, self.L-self.first_l, self.Cvae)
         :return: logits BLV, V is vocab_size
         """
         bg, ed = self.begin_ends[self.prog_si] if self.prog_si >= 0 else (0, self.L)
         B = x_BLCv_wo_first_l.shape[0]
         with torch.cuda.amp.autocast(enabled=False):
-            label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
-            sos = cond_BD = self.class_emb(label_B)
+            # label_B = torch.where(torch.rand(B, device=label_B.device) < self.cond_drop_rate, self.num_classes, label_B)
+            # sos = cond_BD = self.class_emb(label_B)
+            cond_BD = text_features_BD
+            # sos = self.linear_to_sos(cond_BD)
+            sos = torch.cat((cond_BD, self.sos_padding.expand(B, -1)), dim=1)
+            assert tuple(sos.shape) == (B, self.C)
             sos = sos.unsqueeze(1).expand(B, self.first_l, -1) + self.pos_start.expand(B, self.first_l, -1)
             
             if self.prog_si == 0: x_BLC = sos
@@ -295,7 +330,8 @@ class VARHF(VAR, PyTorchModelHubMixin):
     def __init__(
         self,
         vae_kwargs,
-        num_classes=1000, depth=16, embed_dim=1024, num_heads=16, mlp_ratio=4., drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
+        # num_classes=1000, 
+        depth=16, embed_dim=1024, num_heads=16, mlp_ratio=4., drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
         norm_eps=1e-6, shared_aln=False, cond_drop_rate=0.1,
         attn_l2_norm=False,
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),   # 10 steps by default
@@ -304,7 +340,8 @@ class VARHF(VAR, PyTorchModelHubMixin):
         vae_local = VQVAE(**vae_kwargs)
         super().__init__(
             vae_local=vae_local,
-            num_classes=num_classes, depth=depth, embed_dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
+            # num_classes=num_classes, 
+            depth=depth, embed_dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
             norm_eps=norm_eps, shared_aln=shared_aln, cond_drop_rate=cond_drop_rate,
             attn_l2_norm=attn_l2_norm,
             patch_nums=patch_nums,

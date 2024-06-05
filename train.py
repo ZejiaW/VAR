@@ -13,7 +13,7 @@ import dist
 from utils import arg_util, misc
 from utils.data import build_dataset
 from utils.data_sampler import DistInfiniteBatchSampler, EvalDistributedSampler
-from utils.misc import auto_resume
+from utils.misc import auto_resume, load_state_dict_with_mismatch_handling
 
 
 def build_everything(args: arg_util.Args):
@@ -39,10 +39,15 @@ def build_everything(args: arg_util.Args):
     # build data
     if not args.local_debug:
         print(f'[build PT data] ...\n')
-        num_classes, dataset_train, dataset_val = build_dataset(
+        # num_classes, dataset_train, dataset_val = build_dataset(
+        #     args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso,
+        # )
+        dataset_train, dataset_val = build_dataset(
             args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso,
         )
         types = str((type(dataset_train).__name__, type(dataset_val).__name__))
+        
+        use_clip = False if dataset_train.load_text_features and dataset_val.load_text_features else True
         
         ld_val = DataLoader(
             dataset_val, num_workers=0, pin_memory=True,
@@ -71,7 +76,7 @@ def build_everything(args: arg_util.Args):
         print(f'[dataloader] gbs={args.glb_batch_size}, lbs={args.batch_size}, iters_train={iters_train}, types(tr, va)={types}')
     
     else:
-        num_classes = 1000
+        # num_classes = 1000
         ld_val = ld_train = None
         iters_train = 10
     
@@ -81,11 +86,14 @@ def build_everything(args: arg_util.Args):
     from trainer import VARTrainer
     from utils.amp_sc import AmpOptimizer
     from utils.lr_control import filter_params
+    if use_clip:
+        import clip
     
     vae_local, var_wo_ddp = build_vae_var(
         V=4096, Cvae=32, ch=160, share_quant_resi=4,        # hard-coded VQVAE hyperparameters
         device=dist.get_device(), patch_nums=args.patch_nums,
-        num_classes=num_classes, depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
+        # num_classes=num_classes, 
+        depth=args.depth, shared_aln=args.saln, attn_l2_norm=args.anorm,
         flash_if_available=args.fuse, fused_if_available=args.fuse,
         init_adaln=args.aln, init_adaln_gamma=args.alng, init_head=args.hd, init_std=args.ini,
     )
@@ -97,6 +105,16 @@ def build_everything(args: arg_util.Args):
     dist.barrier()
     vae_local.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
     
+    print(f"[Info] Using pretrained checkpoint: {args.use_pretrained_ckpt}")
+    if args.use_pretrained_ckpt:
+        var_ckpt = f'var_d{args.depth}.pth'
+        if dist.is_local_master():
+            if not os.path.exists(var_ckpt):
+                os.system(f'wget https://huggingface.co/FoundationVision/var/resolve/main/{var_ckpt}')
+        dist.barrier()
+        load_state_dict_with_mismatch_handling(var_wo_ddp, var_ckpt)
+        # var_wo_ddp.load_state_dict(torch.load(var_ckpt, map_location='cpu'), strict=False)
+    
     vae_local: VQVAE = args.compile_model(vae_local, args.vfast)
     var_wo_ddp: VAR = args.compile_model(var_wo_ddp, args.tfast)
     var: DDP = (DDP if dist.initialized() else NullDDP)(var_wo_ddp, device_ids=[dist.get_local_rank()], find_unused_parameters=False, broadcast_buffers=False)
@@ -105,6 +123,14 @@ def build_everything(args: arg_util.Args):
     count_p = lambda m: f'{sum(p.numel() for p in m.parameters())/1e6:.2f}'
     print(f'[INIT][#para] ' + ', '.join([f'{k}={count_p(m)}' for k, m in (('VAE', vae_local), ('VAE.enc', vae_local.encoder), ('VAE.dec', vae_local.decoder), ('VAE.quant', vae_local.quantize))]))
     print(f'[INIT][#para] ' + ', '.join([f'{k}={count_p(m)}' for k, m in (('VAR', var_wo_ddp),)]) + '\n\n')
+    
+    # load clip model
+    if use_clip:
+        clip_model, _ = clip.load('ViT-L/14', device=dist.get_device())
+        print(f'[INIT] CLIP model = {clip_model}\n\n')
+    else:
+        clip_model = None
+        print(f'[INIT] CLIP model is not needed.\n\n')
     
     # build optimizer
     names, paras, para_groups = filter_params(var_wo_ddp, nowd_keys={
@@ -131,7 +157,7 @@ def build_everything(args: arg_util.Args):
     trainer = VARTrainer(
         device=args.device, patch_nums=args.patch_nums, resos=args.resos,
         vae_local=vae_local, var_wo_ddp=var_wo_ddp, var=var,
-        var_opt=var_optim, label_smooth=args.ls,
+        var_opt=var_optim, label_smooth=args.ls, clip=clip_model,
     )
     if trainer_state is not None and len(trainer_state):
         trainer.load_state_dict(trainer_state, strict=False, skip_vae=True) # don't load vae again
@@ -142,17 +168,19 @@ def build_everything(args: arg_util.Args):
         rng.manual_seed(0)
         B = 4
         inp = torch.rand(B, 3, args.data_load_reso, args.data_load_reso)
-        label = torch.ones(B, dtype=torch.long)
+        text_features = torch.rand(B, 768)
+        # label = torch.ones(B, dtype=torch.long)
+        label = ("dog" for _ in range(B))
         
         me = misc.MetricLogger(delimiter='  ')
         trainer.train_step(
             it=0, g_it=0, stepping=True, metric_lg=me, tb_lg=tb_lg,
-            inp_B3HW=inp, label_B=label, prog_si=args.pg0, prog_wp_it=20,
+            inp_B3HW=inp, text_features_BD=text_features, label_B=label, prog_si=args.pg0, prog_wp_it=20,
         )
         trainer.load_state_dict(trainer.state_dict())
         trainer.train_step(
             it=99, g_it=599, stepping=True, metric_lg=me, tb_lg=tb_lg,
-            inp_B3HW=inp, label_B=label, prog_si=-1, prog_wp_it=20,
+            inp_B3HW=inp, text_features_BD=text_features, label_B=label, prog_si=-1, prog_wp_it=20,
         )
         print({k: meter.global_avg for k, meter in me.meters.items()})
         
@@ -269,13 +297,22 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
         warnings.filterwarnings('ignore', category=UserWarning)
     g_it, max_it = ep * iters_train, args.ep * iters_train
     
-    for it, (inp, label) in me.log_every(start_it, iters_train, ld_or_itrt, 30 if iters_train > 8000 else 5, header):
+    for it, batch in me.log_every(start_it, iters_train, ld_or_itrt, 30 if iters_train > 8000 else 5, header):
         g_it = ep * iters_train + it
         if it < start_it: continue
         if is_first_ep and it == start_it: warnings.resetwarnings()
         
+        inp, label = batch[0], batch[1]
+        text_features_BD = batch[2] if len(batch) > 2 else None
+        
         inp = inp.to(args.device, non_blocking=True)
-        label = label.to(args.device, non_blocking=True)
+        # label = label.to(args.device, non_blocking=True)
+        if text_features_BD is not None:
+            text_features_BD = text_features_BD.to(dist.get_device(), non_blocking=True)
+        else:
+            assert trainer.clip is not None, 'text_features_BD is not loaded, but self.clip is None'
+            text = trainer.clip.tokenize(label).to(dist.get_device(), non_blocking=True)
+            text_features_BD = self.clip.encode_text(text).to(dist.get_device(), non_blocking=True)
         
         args.cur_it = f'{it+1}/{iters_train}'
         
@@ -298,7 +335,7 @@ def train_one_ep(ep: int, is_first_ep: bool, start_it: int, args: arg_util.Args,
         
         grad_norm, scale_log2 = trainer.train_step(
             it=it, g_it=g_it, stepping=stepping, metric_lg=me, tb_lg=tb_lg,
-            inp_B3HW=inp, label_B=label, prog_si=prog_si, prog_wp_it=args.pgwp * iters_train,
+            inp_B3HW=inp, text_features_BD=text_features_BD, label_B=label, prog_si=prog_si, prog_wp_it=args.pgwp * iters_train,
         )
         
         me.update(tlr=max_tlr)

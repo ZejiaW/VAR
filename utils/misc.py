@@ -379,3 +379,18 @@ def create_npz_from_sample_folder(sample_folder: str):
     np.savez(npz_path, arr_0=samples)
     print(f'Saved .npz file to {npz_path} [shape={samples.shape}].')
     return npz_path
+
+def load_state_dict_with_mismatch_handling(model, state_dict_path):
+    state_dict = torch.load(state_dict_path, map_location='cpu')
+
+    filtered_state_dict = {}
+    model_state_dict = model.state_dict()
+
+    for name, param in state_dict.items():
+        if name in model_state_dict:
+            if param.shape == model_state_dict[name].shape:
+                filtered_state_dict[name] = param
+            else:
+                print(f"[State_dict Loading] Skipping parameter '{name}' due to size mismatch: {param.shape} vs {model_state_dict[name].shape}")
+
+    model.load_state_dict(filtered_state_dict, strict=False)

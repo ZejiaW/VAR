@@ -11,6 +11,8 @@ from models import VAR, VQVAE, VectorQuantizer2
 from utils.amp_sc import AmpOptimizer
 from utils.misc import MetricLogger, TensorboardLogger
 
+import clip
+
 Ten = torch.Tensor
 FTen = torch.Tensor
 ITen = torch.LongTensor
@@ -21,7 +23,7 @@ class VARTrainer(object):
     def __init__(
         self, device, patch_nums: Tuple[int, ...], resos: Tuple[int, ...],
         vae_local: VQVAE, var_wo_ddp: VAR, var: DDP,
-        var_opt: AmpOptimizer, label_smooth: float,
+        var_opt: AmpOptimizer, label_smooth: float, clip: Union[clip.model.CLIP, None] = None
     ):
         super(VARTrainer, self).__init__()
         
@@ -29,6 +31,8 @@ class VARTrainer(object):
         self.quantize_local: VectorQuantizer2
         self.var_wo_ddp: VAR = var_wo_ddp  # after torch.compile
         self.var_opt = var_opt
+        
+        self.clip = clip
         
         del self.var_wo_ddp.rng
         self.var_wo_ddp.rng = torch.Generator(device=device)
@@ -58,17 +62,27 @@ class VARTrainer(object):
         stt = time.time()
         training = self.var_wo_ddp.training
         self.var_wo_ddp.eval()
-        for inp_B3HW, label_B in ld_val:
-            B, V = label_B.shape[0], self.vae_local.vocab_size
+        for batch in ld_val: # label_B is caption now
+            inp_B3HW, label_B = batch[0], batch[1]
+            text_features_BD = batch[2] if len(batch) > 2 else None
+            # B, V = label_B.shape[0], self.vae_local.vocab_size
+            B, V = inp_B3HW.shape[0], self.vae_local.vocab_size
             inp_B3HW = inp_B3HW.to(dist.get_device(), non_blocking=True)
-            label_B = label_B.to(dist.get_device(), non_blocking=True)
+            # label_B = label_B.to(dist.get_device(), non_blocking=True)
+            if text_features_BD is not None:
+                text_features_BD = text_features_BD.to(dist.get_device(), non_blocking=True)
+            else:
+                assert self.clip is not None, 'text_features_BD is not loaded, but self.clip is None'
+                text = self.clip.tokenize(label_B).to(dist.get_device(), non_blocking=True)
+                text_features_BD = self.clip.encode_text(text).to(dist.get_device(), non_blocking=True)
             
             gt_idx_Bl: List[ITen] = self.vae_local.img_to_idxBl(inp_B3HW)
             gt_BL = torch.cat(gt_idx_Bl, dim=1)
             x_BLCv_wo_first_l: Ten = self.quantize_local.idxBl_to_var_input(gt_idx_Bl)
             
             self.var_wo_ddp.forward
-            logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
+            # logits_BLV = self.var_wo_ddp(label_B, x_BLCv_wo_first_l)
+            logits_BLV = self.var_wo_ddp(text_features_BD, x_BLCv_wo_first_l)
             L_mean += self.val_loss(logits_BLV.data.view(-1, V), gt_BL.view(-1)) * B
             L_tail += self.val_loss(logits_BLV.data[:, -self.last_l:].reshape(-1, V), gt_BL[:, -self.last_l:].reshape(-1)) * B
             acc_mean += (logits_BLV.data.argmax(dim=-1) == gt_BL).sum() * (100/gt_BL.shape[1])
@@ -85,7 +99,7 @@ class VARTrainer(object):
     
     def train_step(
         self, it: int, g_it: int, stepping: bool, metric_lg: MetricLogger, tb_lg: TensorboardLogger,
-        inp_B3HW: FTen, label_B: Union[ITen, FTen], prog_si: int, prog_wp_it: float,
+        inp_B3HW: FTen, text_features_BD: FTen, label_B: Tuple[str], prog_si: int, prog_wp_it: float,
     ) -> Tuple[Optional[Union[Ten, float]], Optional[float]]:
         # if progressive training
         self.var_wo_ddp.prog_si = self.vae_local.quantize.prog_si = prog_si
@@ -99,7 +113,8 @@ class VARTrainer(object):
         if prog_si == len(self.patch_nums) - 1: prog_si = -1    # max prog, as if no prog
         
         # forward
-        B, V = label_B.shape[0], self.vae_local.vocab_size
+        # B, V = label_B.shape[0], self.vae_local.vocab_size
+        B, V = inp_B3HW.shape[0], self.vae_local.vocab_size
         self.var.require_backward_grad_sync = stepping
         
         gt_idx_Bl: List[ITen] = self.vae_local.img_to_idxBl(inp_B3HW)
@@ -108,7 +123,8 @@ class VARTrainer(object):
         
         with self.var_opt.amp_ctx:
             self.var_wo_ddp.forward
-            logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
+            # logits_BLV = self.var(label_B, x_BLCv_wo_first_l)
+            logits_BLV = self.var(text_features_BD, x_BLCv_wo_first_l)
             loss = self.train_loss(logits_BLV.view(-1, V), gt_BL.view(-1)).view(B, -1)
             if prog_si >= 0:    # in progressive training
                 bg, ed = self.begin_ends[prog_si]
