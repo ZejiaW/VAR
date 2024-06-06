@@ -43,7 +43,7 @@ def build_everything(args: arg_util.Args):
         #     args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso,
         # )
         dataset_train, dataset_val = build_dataset(
-            args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso,
+            args.data_path, final_reso=args.data_load_reso, hflip=args.hflip, mid_reso=args.mid_reso, first_N=args.first_N,
         )
         types = str((type(dataset_train).__name__, type(dataset_val).__name__))
         
@@ -233,7 +233,7 @@ def main_training():
         args.remain_time, args.finish_time = remain_time, finish_time
         
         AR_ep_loss = dict(L_mean=L_mean, L_tail=L_tail, acc_mean=acc_mean, acc_tail=acc_tail)
-        is_val_and_also_saving = (ep + 1) % 10 == 0 or (ep + 1) == args.ep
+        is_val_and_also_saving = (ep + 1) % 5 == 0 or (ep + 1) == args.ep or ep == 3 or ep == 0
         if is_val_and_also_saving:
             val_loss_mean, val_loss_tail, val_acc_mean, val_acc_tail, tot, cost = trainer.eval_ep(ld_val)
             best_updated = best_val_loss_tail > val_loss_tail
