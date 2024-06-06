@@ -255,7 +255,7 @@ class VAR(nn.Module):
         AdaLNSelfAttn.forward
         for i, b in enumerate(self.blocks):
             x_BLC = b(x=x_BLC, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
-        x_BLC = self.get_logits(x_BLC.float(), cond_BD)
+        x_BLC = self.get_logits(x_BLC.float(), cond_BD.float())
         
         if self.prog_si == 0:
             if isinstance(self.word_embed, nn.Linear):

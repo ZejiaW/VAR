@@ -77,6 +77,7 @@ class Args(Tap):
     mid_reso: float = 1.125     # aug: first resize to mid_reso = 1.125 * data_load_reso, then crop to data_load_reso
     hflip: bool = False         # augmentation: horizontal flip
     workers: int = 0        # num workers; 0: auto, -1: don't use multiprocessing in DataLoader
+    first_N: int = -1     # only use the first N samples
     
     # progressive training
     pg: float = 0.0         # >0 for use progressive training during [0%, this] of training
@@ -105,7 +106,7 @@ class Args(Tap):
     finish_time: str = ''       # [automatically set; don't specify this]
     
     # environment
-    local_out_dir_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'local_output')  # [automatically set; don't specify this]
+    local_out_dir_path: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'local_output_60000')  # [automatically set; don't specify this]
     tb_log_dir_path: str = '...tb-...'  # [automatically set; don't specify this]
     log_txt_path: str = '...'           # [automatically set; don't specify this]
     last_ckpt_path: str = '...'         # [automatically set; don't specify this]

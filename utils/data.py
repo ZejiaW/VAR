@@ -17,7 +17,7 @@ def normalize_01_into_pm1(x):  # normalize x from [0, 1] to [-1, 1] by (x*2) - 1
 
 
 class COCOdata(Dataset):
-    def __init__(self, img_dir, anno_dir, mode="train", transform=None, loader=None, data_root=None):
+    def __init__(self, img_dir, anno_dir, mode="train", transform=None, loader=None, data_root=None, first_N=-1):
         # self.img_dir_train = img_dir_train
         # self.img_dir_val = img_dir_val
         self.img_dir = img_dir
@@ -25,7 +25,10 @@ class COCOdata(Dataset):
         self.transform = transform
         # self.classes = sorted(os.listdir(root_dir))
         # self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
-        self.images = self._load_images_anno(self.img_dir, mode)
+        if first_N >= 0:
+            self.images = self._load_images_anno(self.img_dir, mode)[:first_N]
+        else:
+            self.images = self._load_images_anno(self.img_dir, mode)
         self.loader = loader
         
         if transform is None:
@@ -35,7 +38,10 @@ class COCOdata(Dataset):
             ])
             
         if data_root is not None and osp.exists(osp.join(data_root, f'annotation_text_features_{mode}.npy')):
-            self.text_features = np.load(osp.join(data_root, f'annotation_text_features_{mode}.npy'))
+            if first_N >= 0:
+                self.text_features = np.load(osp.join(data_root, f'annotation_text_features_{mode}.npy'))[:first_N, :]
+            else:
+                self.text_features = np.load(osp.join(data_root, f'annotation_text_features_{mode}.npy'))
             assert self.text_features.shape[0] == len(self.images)
             self.load_text_features = True
         else:
@@ -86,7 +92,7 @@ class COCOdata(Dataset):
 
 def build_dataset(
     data_path: str, final_reso: int,
-    hflip=False, mid_reso=1.125,
+    hflip=False, mid_reso=1.125, first_N=-1
 ):
     # build augmentations
     mid_reso = round(mid_reso * final_reso)  # first resize to mid_reso, then crop to final_reso
@@ -106,7 +112,7 @@ def build_dataset(
     img_dir_val = osp.join(data_path, 'val2017')
     anno_dir = os.path.join(data_path, 'annotations')
     # build dataset
-    train_set = COCOdata(img_dir=img_dir_train, anno_dir=anno_dir, mode='train', loader=pil_loader, transform=train_aug, data_root=data_path)
+    train_set = COCOdata(img_dir=img_dir_train, anno_dir=anno_dir, mode='train', loader=pil_loader, transform=train_aug, data_root=data_path, first_N=first_N)
     val_set = COCOdata(img_dir=img_dir_val, anno_dir=anno_dir, mode='val', loader=pil_loader, transform=val_aug, data_root=data_path)
 
     print(f'[Dataset] {len(train_set)=}, {len(val_set)=}')
