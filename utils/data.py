@@ -3,6 +3,7 @@ import os.path as osp
 import json
 import pickle
 import torch
+import glob
 import numpy as np
 from tqdm import tqdm
 
@@ -136,3 +137,30 @@ def print_aug(transform, label):
     else:
         print(transform)
     print('---------------------------\n')
+    
+
+class COCOCaptionFeature(Dataset):
+    def __init__(self, data_path, mode='val'):
+        self.data_path = data_path
+        self.mode = mode
+        self.text_feature = np.load(osp.join(data_path, f'annotation_text_features_{mode}.npy'))
+        self.text_feature = torch.from_numpy(self.text_feature).float()
+        
+    def __len__(self):
+        return len(self.text_feature)
+    
+    def __getitem__(self, idx):
+        return self.text_feature[idx]
+    
+class ISImageDataset(Dataset):
+    def __init__(self, root, transforms_=None):
+        self.transform = transforms.Compose(transforms_)
+        self.files = sorted(glob.glob(os.path.join(root) + "/*.jpg"))
+
+    def __getitem__(self, index):
+        img = PImage.open(self.files[index % len(self.files)]).convert('RGB')      
+        item_image = self.transform(img)
+        return item_image
+
+    def __len__(self):
+        return len(self.files)
