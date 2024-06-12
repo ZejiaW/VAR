@@ -3,8 +3,8 @@ generate image in validation dataset, for calculating FID and IS
 """
 
 # set args
-model_ckpt = r"/root/data_new/zejia/workspace/psl/var/VAR/local_output_big/ar-ckpt-last.pth"
-generated_folder_path = r'big_ep40'
+model_ckpt = r"/root/data_new/zejia/workspace/psl/var/VAR/local_output/ar-ckpt-last.pth"
+generated_folder_path = r'10000_last'
 
 data_path = r"/root/data_new/zejia/workspace/psl/var/datasets/COCO2017"
 real_resize_folder_path = r'/root/data_new/zejia/workspace/psl/var/datasets/COCO2017/val_resize'

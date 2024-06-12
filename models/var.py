@@ -217,6 +217,66 @@ class VAR(nn.Module):
         for b in self.blocks: b.attn.kv_caching(False)
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
+    @torch.no_grad()
+    def autoregressive_process(
+        self, B: int, 
+        text_features_BD: torch.Tensor,  # text features for the prompt
+        # label_B: Optional[Union[int, torch.LongTensor]],
+        g_seed: Optional[int] = None, cfg=1.5, top_k=0, top_p=0.0,
+        more_smooth=False,
+    ) -> list:   # returns reconstructed image (B, 3, H, W) in [0, 1]
+        
+        if g_seed is None: rng = None
+        else: self.rng.manual_seed(g_seed); rng = self.rng
+        
+        if text_features_BD is None:
+            text_features_BD = self.no_caption_emb.expand(B, -1)
+            
+        cond_BD = torch.cat((text_features_BD, self.no_caption_emb.expand(B, -1)), dim=0)
+
+        sos = torch.cat((cond_BD, self.sos_padding.expand(2*B, -1)), dim=1)
+        assert tuple(sos.shape) == (2*B, self.C)
+        
+        lvl_pos = self.lvl_embed(self.lvl_1L) + self.pos_1LC
+        next_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
+        
+        cur_L = 0
+        f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
+        f_hat_list = [f_hat.clone()]
+        
+        for b in self.blocks: b.attn.kv_caching(True)
+        for si, pn in enumerate(self.patch_nums):   # si: i-th segment
+            ratio = si / self.num_stages_minus_1
+            # last_L = cur_L
+            cur_L += pn*pn
+            cond_BD_or_gss = self.shared_ada_lin(cond_BD) # 2B 1 6 C
+            x = next_token_map
+            # AdaLNSelfAttn.forward
+            for b in self.blocks:
+                x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+            logits_BlV = self.get_logits(x, cond_BD)
+            
+            t = cfg * ratio
+            logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
+            
+            idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            if not more_smooth: # this is the default case
+                h_BChw = self.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
+            else:   # not used when evaluating FID/IS/Precision/Recall
+                gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
+                h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+            
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+            f_hat, next_token_map = self.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
+            f_hat_list.append(f_hat.clone())
+            if si != self.num_stages_minus_1:   # prepare for next stage
+                next_token_map = next_token_map.view(B, self.Cvae, -1).transpose(1, 2)
+                next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]
+                next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
+        
+        for b in self.blocks: b.attn.kv_caching(False)
+        return [self.vae_proxy[0].fhat_to_img(_).add_(1).mul_(0.5) for _ in f_hat_list]   # de-normalize, from [-1, 1] to [0, 1]
+    
     def forward(self, text_features_BD: torch.Tensor,  # text features for the prompt
                 # label_B: torch.LongTensor, 
                 x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
